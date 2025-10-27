@@ -1,7 +1,9 @@
 import pandas as pd
 import re
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Optional
 import pdfplumber  # For PDF parsing
+import tabula  # For table extraction
+import PyPDF2  # For text extraction
 from PIL import Image
 import pytesseract  # For OCR from images
 
@@ -46,9 +48,25 @@ class MutualFundDataParser:
         }
 
     def parse_from_pdf(self, filepath: str, password: str = 'BREPK5205M') -> pd.DataFrame:
-        """Parse data from PDF file using pdfplumber"""
+        """Parse data from PDF using multiple methods"""
+        df = None
+
+        # Try pdfplumber first
+        df = self._parse_with_pdfplumber(filepath, password)
+
+        # If pdfplumber fails, try tabula
+        if df is None or df.empty:
+            df = self._parse_with_tabula(filepath, password)
+
+        # If tabula fails, try PyPDF2
+        if df is None or df.empty:
+            df = self._parse_with_pypdf2(filepath, password)
+
+        return df if df is not None else pd.DataFrame()
+
+    def _parse_with_pdfplumber(self, filepath: str, password: str) -> Optional[pd.DataFrame]:
+        """Parse PDF using pdfplumber library"""
         try:
-            # Open PDF with password
             with pdfplumber.open(filepath, password=password) as pdf:
                 print(f"Successfully opened PDF with {len(pdf.pages)} pages")
 
@@ -124,13 +142,58 @@ class MutualFundDataParser:
                                 in_holdings_section = True
                                 continue
 
-                            if in_holdings_section:
-                                if not headers and any(word in line.lower() for word in ['scheme', 'isin']):
-                                    headers = self._extract_columns(line)
-                                elif headers and any(x in line for x in ['INF', 'ARN-']):
-                                    row_data = self._parse_data_row(line)
-                                    if row_data and len(row_data) >= 5:
-                                        data.append(row_data)
+                if data:
+                    # Create DataFrame
+                    df = pd.DataFrame(data)
+                    if len(df.columns) == len(headers):
+                        df.columns = headers
+                    return self._clean_dataframe(df)
+                return None
+        except Exception as e:
+            print(f"pdfplumber parsing failed: {e}")
+            return None
+
+    def _parse_with_tabula(self, filepath: str, password: str) -> Optional[pd.DataFrame]:
+        """Parse PDF using tabula library"""
+        try:
+            tables = tabula.read_pdf(filepath, pages='all', multiple_tables=True,
+                                   password=password)
+            if tables:
+                df = pd.concat(tables, ignore_index=True)
+                print(f"Extracted data using tabula")
+                return df
+        except Exception as e:
+            print(f"tabula parsing failed: {e}")
+            return None
+
+    def _parse_with_pypdf2(self, filepath: str, password: str) -> Optional[pd.DataFrame]:
+        """Parse PDF using PyPDF2 library"""
+        try:
+            with open(filepath, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                if reader.is_encrypted:
+                    reader.decrypt(password)
+                text = ''
+                for page in reader.pages:
+                    text += page.extract_text()
+                # Parse text content
+                lines = text.split('\n')
+                data = []
+                headers = None
+                in_holdings_section = False
+
+                for line in lines:
+                    if 'MUTUAL FUND UNITS HELD AS ON' in line:
+                        in_holdings_section = True
+                        continue
+
+                    if in_holdings_section:
+                        if not headers and any(word in line.lower() for word in ['scheme', 'isin']):
+                            headers = self._extract_columns(line)
+                        elif headers and any(x in line for x in ['INF', 'ARN-']):
+                            row_data = self._parse_data_row(line)
+                            if row_data and len(row_data) >= 5:
+                                data.append(row_data)
 
                 if data:
                     # Create DataFrame
@@ -317,16 +380,128 @@ class MutualFundDataParser:
 
     def export_to_excel(self, df: pd.DataFrame, output_path: str):
         """Export dataframe to Excel with formatting"""
-        if df is None:
+        if df is None or df.empty:
             print("No data to export")
             return
 
         try:
             with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
                 df.to_excel(writer, sheet_name='Holdings', index=False)
-            print(f"Data exported to {output_path}")
+
+                # Get workbook and worksheet
+                workbook = writer.book
+                worksheet = writer.sheets['Holdings']
+
+                # Auto-adjust columns
+                for column in worksheet.columns:
+                    max_length = 0
+                    column_letter = column[0].column_letter
+
+                    # Find maximum length in column
+                    for cell in column:
+                        try:
+                            if len(str(cell.value)) > max_length:
+                                max_length = len(cell.value)
+                        except:
+                            pass
+
+                    # Set width (limit to 60 to avoid too wide columns)
+                    adjusted_width = min(max_length + 2, 60)
+                    worksheet.column_dimensions[column_letter].width = adjusted_width
+
+                print(f"Data exported to {output_path}")
         except Exception as e:
             print(f"Error exporting to Excel: {e}")
+
+    def export_to_json(self, df: pd.DataFrame, output_path: str, include_summary: bool = True):
+        """Export holdings data and summary to JSON"""
+        if df is None or df.empty:
+            print("No data to export")
+            return
+
+        try:
+            # Convert DataFrame to dict format
+            holdings_data = df.to_dict(orient='records')
+
+            # Calculate summary statistics
+            summary_stats = self.get_summary_statistics(df)
+
+            # Build JSON dict using helper so API and other callers can reuse
+            json_data = self.to_json_dict(df)
+
+            # Write to JSON file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                import json
+                json.dump(json_data, f, indent=2, ensure_ascii=False)
+
+            print(f"Data exported to {output_path}")
+        except Exception as e:
+            print(f"Error exporting to JSON: {e}")
+
+    def to_json_dict(self, df: pd.DataFrame) -> dict:
+        """Return a JSON-serializable dict for the holdings and summary.
+
+        This method centralizes the JSON structure so external callers (for example
+        an API) can obtain the payload without writing to disk.
+        """
+        # Convert DataFrame to dict format
+        holdings_data = df.to_dict(orient='records')
+
+        # Calculate summary statistics
+        summary_stats = self.get_summary_statistics(df)
+
+        # Helper to clean folio and numeric conversion
+        def clean_folio(val):
+            try:
+                s = str(val)
+                # remove newlines and stray soft-hyphen-like or NBSP chars
+                s = re.sub(r"[\n\r\u00AD\u2011\u00A0]", '', s)
+                s = s.strip()
+                return s
+            except Exception:
+                return str(val)
+
+        json_data = {
+            'date': df.get('Date', pd.Timestamp.now().strftime('%Y-%m-%d')),
+            'portfolio_summary': {
+                'total_schemes': summary_stats.get('total_schemes', 0),
+                'total_valuation': round(summary_stats.get('total_valuation', 0), 2),
+                'total_investment': round(summary_stats.get('total_investment', 0), 2),
+                'total_profit_loss': round(summary_stats.get('total_profit_loss', 0), 2),
+                'overall_return_percentage': round(summary_stats.get('overall_return_percentage', 0), 2)
+            },
+            'holdings': []
+        }
+
+        for holding in holdings_data:
+            try:
+                commission_raw = holding.get('Commission', 0)
+                # ensure commission is numeric and not NaN
+                commission = 0.0
+                if commission_raw is not None and pd.notna(commission_raw) and str(commission_raw).strip().lower() not in ['nan', 'none']:
+                    commission = float(str(commission_raw).replace(',', ''))
+
+                h = {
+                    'scheme_name': holding.get('Scheme Name'),
+                    'isin': holding.get('ISIN'),
+                    'folio_no': clean_folio(holding.get('Folio No.')),
+                    'arn_code': holding.get('ARN Code'),
+                    'units': round(float(holding.get('Closing Units', 0) or 0), 3),
+                    'nav': round(float(holding.get('NAV', 0) or 0), 4),
+                    'cost': round(float(holding.get('Cost', 0) or 0), 2),
+                    'current_value': round(float(holding.get('Market Value', 0) or 0), 2),
+                    'ter_regular': float(holding.get('TER Regular', 0) or 0),
+                    'ter_direct': float(holding.get('TER Direct', 0) or 0),
+                    'commission': round(commission, 2),
+                    'profit_loss': round(float(holding.get('Profit/Loss', 0) or 0), 2),
+                    'profit_loss_percentage': round(float(holding.get('Profit/Loss %', 0) or 0), 2)
+                }
+                json_data['holdings'].append(h)
+            except Exception:
+                # skip problematic rows but continue
+                continue
+
+        return json_data
 
 
 # Example usage
@@ -349,6 +524,13 @@ if __name__ == "__main__":
                     print(f"{key}: ₹{value:,.2f}" if 'total' in key else f"{key}: {value:.2f}%")
                 else:
                     print(f"{key}: {value}")
-            parser.export_to_excel(df, pdf_file.replace('.pdf', '_holdings.xlsx'))
+
+            # Export to both Excel and JSON
+            excel_path = pdf_file.replace('.pdf', '_holdings.xlsx')
+            json_path = pdf_file.replace('.pdf', '_holdings.json')
+            parser.export_to_excel(df, excel_path)
+            parser.export_to_json(df, json_path)
     else:
         print("Please provide a PDF file path as argument")
+
+    # module-level to_json_dict removed; using class method
