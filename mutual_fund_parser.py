@@ -10,7 +10,7 @@ class MutualFundDataParser:
     A robust parser for mutual fund holdings data.
     Supports multiple input formats: CSV, Excel, PDF, and images.
     """
-    
+
     def __init__(self):
         self.columns = [
             'Scheme Name',
@@ -27,7 +27,7 @@ class MutualFundDataParser:
             'Profit/Loss',
             'Profit/Loss %'
         ]
-        
+
         # Column mappings for flexibility in parsing
         self.column_patterns = {
             'scheme': ['scheme', 'fund', 'portfolio'],
@@ -44,40 +44,40 @@ class MutualFundDataParser:
             'profit_loss': ['profit/loss', 'unrealised', 'pl'],
             'profit_loss_pct': ['profit.*%', 'loss.*%', 'return']
         }
-    
+
     def parse_from_pdf(self, filepath: str, password: str = 'BREPK5205M') -> pd.DataFrame:
         """Parse data from PDF file using pdfplumber"""
         try:
             # Open PDF with password
             with pdfplumber.open(filepath, password=password) as pdf:
                 print(f"Successfully opened PDF with {len(pdf.pages)} pages")
-                
+
                 # Initialize data storage
                 data = []
                 headers = None
                 table_started = False
-                
+
                 # Process each page
                 for page_num, page in enumerate(pdf.pages, 1):
                     print(f"\nProcessing page {page_num}")
                     text = page.extract_text()
                     if not text:
                         continue
-                    
+
                     # Print the text for debugging
                     print("\nPage text:")
                     print(text[:500] + "..." if len(text) > 500 else text)
-                    
+
                     # Try text-based parsing first
                     lines = text.split('\n')
                     in_holdings_section = False
-                    
+
                     for line in lines:
                         if 'MUTUAL FUND UNITS HELD AS ON' in line:
                             print(f"\nFound holdings section: {line}")
                             in_holdings_section = True
                             continue
-                        
+
                         if in_holdings_section:
                             if not headers and ('Scheme' in line or 'ISIN' in line):
                                 print(f"\nPotential header line: {line}")
@@ -88,7 +88,7 @@ class MutualFundDataParser:
                                 if row_data and len(row_data) >= 5:
                                     print(f"\nFound data row: {row_data}")
                                     data.append(row_data)
-                    
+
                     # Only try table extraction if text parsing didn't work
                     if not data:
                         try:
@@ -113,17 +113,17 @@ class MutualFundDataParser:
                                                     data.append(row_data)
                         except Exception as e:
                             print(f"Error extracting tables: {e}")
-                    
+
                     # If no tables found, try text parsing
                     if not data:
                         lines = text.split('\n')
                         in_holdings_section = False
-                        
+
                         for line in lines:
                             if 'MUTUAL FUND UNITS HELD AS ON' in line:
                                 in_holdings_section = True
                                 continue
-                            
+
                             if in_holdings_section:
                                 if not headers and any(word in line.lower() for word in ['scheme', 'isin']):
                                     headers = self._extract_columns(line)
@@ -131,7 +131,7 @@ class MutualFundDataParser:
                                     row_data = self._parse_data_row(line)
                                     if row_data and len(row_data) >= 5:
                                         data.append(row_data)
-                
+
                 if data:
                     # Create DataFrame
                     df = pd.DataFrame(data)
@@ -141,13 +141,13 @@ class MutualFundDataParser:
                 else:
                     print("No valid data found in the PDF")
                     return None
-                    
+
         except Exception as e:
             print(f"Error parsing PDF: {e}")
             if "password is invalid" in str(e).lower():
                 print("The provided password is incorrect")
             return None
-    
+
     def _clean_headers(self, headers: List[str]) -> List[str]:
         """Clean and standardize header names"""
         clean_headers = []
@@ -155,7 +155,7 @@ class MutualFundDataParser:
             if not header:
                 continue
             header = str(header).strip().lower()
-            
+
             # Match header with known columns
             matched = False
             for col_name, patterns in self.column_patterns.items():
@@ -163,12 +163,12 @@ class MutualFundDataParser:
                     clean_headers.append(self.columns[len(clean_headers)])
                     matched = True
                     break
-            
+
             if not matched:
                 clean_headers.append(header.title())
-                
+
         return clean_headers
-    
+
     def _extract_columns(self, header_line: str) -> List[str]:
         """Extract column names from header line"""
         # Split by multiple spaces or common separators
@@ -177,16 +177,16 @@ class MutualFundDataParser:
         columns = [col.strip() for col in columns if col.strip()]
         # Map to standard column names where possible
         return self._clean_headers(columns)
-    
+
     def _parse_data_row(self, line: str) -> List[str]:
         """Parse a data row into fields"""
         # First try splitting by common separators
         fields = re.split(r'\s{2,}|\t|│|┃', line.strip())
         fields = [f.strip() for f in fields if f.strip()]
-        
+
         if not fields:
             return None
-            
+
         # Handle scheme name with embedded spaces
         if len(fields) > len(self.columns):
             # Try to merge fields that might be part of scheme name
@@ -208,32 +208,32 @@ class MutualFundDataParser:
             if current:
                 merged.append(' '.join(current))
             fields = merged
-            
+
         return fields
-    
+
     def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """Clean and standardize the dataframe"""
         if df is None or df.empty:
             return None
-        
+
         # Convert DataFrame to string type for consistent handling
         df = df.astype(str)
-        
+
         # Remove completely empty rows and columns
         df = df.replace('', pd.NA).replace('None', pd.NA).replace('nan', pd.NA)
         df = df.dropna(how='all').dropna(axis=1, how='all')
-        
+
         # Drop rows that don't look like holdings data
         df = df[df.apply(lambda row: any('INF' in str(cell) for cell in row), axis=1)]
-        
+
         # Standardize column names
         if len(df.columns) >= 10:  # Make sure we have enough columns
             df.columns = self.columns[:len(df.columns)]
-        
+
         # Clean up scheme names
         if 'Scheme Name' in df.columns:
             df['Scheme Name'] = df['Scheme Name'].apply(lambda x: ' '.join(str(x).split()))
-            
+
         # Try to identify numeric columns
         numeric_patterns = {
             'Closing Units': [r'[\d,.]+'],
@@ -246,7 +246,7 @@ class MutualFundDataParser:
             'Profit/Loss': [r'-?[\d,.]+\.\d{2}'],
             'Profit/Loss %': [r'-?[\d.]+']
         }
-        
+
         def extract_numeric(text, patterns):
             if pd.isna(text) or not text:
                 return None
@@ -256,7 +256,7 @@ class MutualFundDataParser:
                 if match:
                     return match.group(0)
             return None
-        
+
         # Process each column
         for col in df.columns:
             if col in numeric_patterns:
@@ -264,9 +264,9 @@ class MutualFundDataParser:
                 df[col] = df[col].apply(lambda x: extract_numeric(x, numeric_patterns[col]))
                 # Convert to float
                 df[col] = pd.to_numeric(df[col].str.replace(',', '').str.replace('%', ''), errors='coerce')
-        
+
         return df
-    
+
     def _clean_numeric(self, series: pd.Series) -> pd.Series:
         """Clean numeric values by removing commas and converting to float"""
         def clean_value(x):
@@ -281,46 +281,46 @@ class MutualFundDataParser:
                 return float(clean)
             except (ValueError, TypeError):
                 return 0.0
-                
+
         return series.apply(clean_value)
-    
+
     def get_summary_statistics(self, df: pd.DataFrame) -> Dict:
         """Calculate summary statistics from the dataframe"""
         if df is None or df.empty:
             return {}
-        
+
         value_col = next((col for col in df.columns if 'value' in col.lower() or 'valuation' in col.lower()), None)
         invested_col = next((col for col in df.columns if 'invested' in col.lower() or 'cost' in col.lower()), None)
         pl_col = next((col for col in df.columns if 'profit' in col.lower() and not '%' in col.lower()), None)
-        
+
         summary = {
             'total_schemes': len(df),
             'total_valuation': df[value_col].sum() if value_col else 0,
             'total_investment': df[invested_col].sum() if invested_col else 0,
             'total_profit_loss': df[pl_col].sum() if pl_col else 0,
         }
-        
+
         summary['overall_return_percentage'] = (
-            (summary['total_profit_loss'] / summary['total_investment'] * 100) 
+            (summary['total_profit_loss'] / summary['total_investment'] * 100)
             if summary['total_investment'] > 0 else 0
         )
-        
+
         return summary
-    
+
     def filter_by_scheme(self, df: pd.DataFrame, scheme_pattern: str) -> pd.DataFrame:
         """Filter dataframe by scheme name pattern"""
         if df is None or not any('scheme' in col.lower() for col in df.columns):
             return None
-        
+
         scheme_col = next(col for col in df.columns if 'scheme' in col.lower())
         return df[df[scheme_col].str.contains(scheme_pattern, case=False, na=False)]
-    
+
     def export_to_excel(self, df: pd.DataFrame, output_path: str):
         """Export dataframe to Excel with formatting"""
         if df is None:
             print("No data to export")
             return
-        
+
         try:
             with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
                 df.to_excel(writer, sheet_name='Holdings', index=False)
@@ -332,7 +332,7 @@ class MutualFundDataParser:
 # Example usage
 if __name__ == "__main__":
     parser = MutualFundDataParser()
-    
+
     # Example with real PDF
     import sys
     if len(sys.argv) > 1:
