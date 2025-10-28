@@ -47,7 +47,7 @@ class MutualFundDataParser:
             'profit_loss_pct': ['profit.*%', 'loss.*%', 'return']
         }
 
-    def parse_from_pdf(self, filepath: str, password: str = 'BREPK5205M') -> pd.DataFrame:
+    def parse_from_pdf(self, filepath: str, password: str = None) -> pd.DataFrame:
         """Parse data from PDF using multiple methods"""
         df = None
 
@@ -67,7 +67,9 @@ class MutualFundDataParser:
     def _parse_with_pdfplumber(self, filepath: str, password: str) -> Optional[pd.DataFrame]:
         """Parse PDF using pdfplumber library"""
         try:
-            with pdfplumber.open(filepath, password=password) as pdf:
+            # Only pass password if it's provided
+            pdf_params = {'password': password} if password else {}
+            with pdfplumber.open(filepath, **pdf_params) as pdf:
                 print(f"Successfully opened PDF with {len(pdf.pages)} pages")
 
                 # Initialize data storage
@@ -156,8 +158,10 @@ class MutualFundDataParser:
     def _parse_with_tabula(self, filepath: str, password: str) -> Optional[pd.DataFrame]:
         """Parse PDF using tabula library"""
         try:
+            # Only pass password if it's provided
+            tabula_params = {'password': password} if password else {}
             tables = tabula.read_pdf(filepath, pages='all', multiple_tables=True,
-                                   password=password)
+                                   **tabula_params)
             if tables:
                 df = pd.concat(tables, ignore_index=True)
                 print(f"Extracted data using tabula")
@@ -171,7 +175,8 @@ class MutualFundDataParser:
         try:
             with open(filepath, 'rb') as file:
                 reader = PyPDF2.PdfReader(file)
-                if reader.is_encrypted:
+                # Only decrypt if password is provided and file is encrypted
+                if reader.is_encrypted and password:
                     reader.decrypt(password)
                 text = ''
                 for page in reader.pages:
